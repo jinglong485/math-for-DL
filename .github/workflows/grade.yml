@@ -1,0 +1,93 @@
+# Runs both test suites on every push to main and publishes the progress page.
+#
+# One-time setup (see README.md): Settings -> Pages -> Source: "GitHub Actions".
+# Then every push updates https://<your-username>.github.io/<repo-name>/
+
+name: Grade and publish
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:          # adds a "Run workflow" button in the Actions tab
+
+permissions:
+  contents: read
+  pages: write                # to publish the page
+  id-token: write             # required by the Pages deployment
+
+concurrency:                  # one run at a time, so the score history never forks
+  group: grade-and-publish
+  cancel-in-progress: false
+
+jobs:
+  grade:
+    name: Run the tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    outputs:
+      regressed: ${{ steps.scores.outputs.regressed }}
+      message: ${{ steps.scores.outputs.message }}
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Install NumPy and pytest
+        run: python -m pip install --upgrade pip && python -m pip install "numpy>=1.24" "pytest>=7.0"
+
+      - name: Configure Pages
+        id: pages
+        uses: actions/configure-pages@v6
+
+      - name: Download the score history from the live site
+        # The runner starts empty every time, so the history lives on the published
+        # page itself. On the very first run there is nothing to download yet.
+        run: |
+          mkdir -p site/data
+          if curl -fsSL "${{ steps.pages.outputs.base_url }}/data/history.json?run=${{ github.run_id }}" -o site/data/history.json; then
+            echo "Downloaded the earlier results."
+          else
+            echo "No earlier history found (normal on the first run)."
+            rm -f site/data/history.json
+          fi
+
+      - name: Run the tests and compute the scores
+        id: scores
+        run: python tools/collect_scores.py
+
+      - name: Upload the page
+        uses: actions/upload-pages-artifact@v5
+        with:
+          path: site
+
+  deploy:
+    name: Publish the page
+    needs: grade
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v5
+
+  score-check:
+    name: Score did not go down
+    needs: [grade, deploy]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Compare with the previous commit
+        env:
+          MESSAGE: ${{ needs.grade.outputs.message }}
+          REGRESSED: ${{ needs.grade.outputs.regressed }}
+        run: |
+          echo "$MESSAGE"
+          if [ "$REGRESSED" = "true" ]; then
+            echo "::error title=Score went down::$MESSAGE"
+            exit 1
+          fi
